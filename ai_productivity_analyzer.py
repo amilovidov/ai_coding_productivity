@@ -23,6 +23,15 @@ import sys
 import os
 from functools import lru_cache
 import time
+import threading
+
+# Try to import zoneinfo (Python 3.9+) or fallback to UTC only
+try:
+    from zoneinfo import ZoneInfo, available_timezones
+    HAS_ZONEINFO = True
+except ImportError:
+    HAS_ZONEINFO = False
+    available_timezones = None
 
 # Configuration constants
 DEFAULT_ANALYSIS_DAYS = 30
@@ -55,45 +64,94 @@ GIT_HOST_PATTERNS = [
 ]
 
 class ProgressIndicator:
-    """Simple progress indicator for long-running operations."""
+    """Thread-safe progress indicator for long-running operations."""
     
     def __init__(self):
+        """Initialize the progress indicator with spinner characters and thread lock."""
         self.spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
         self.index = 0
         self.last_message = ""
+        self._lock = threading.Lock()
     
     def show(self, message: str):
-        """Show progress with spinner."""
-        self.last_message = message
-        spinner_char = self.spinner[self.index % len(self.spinner)]
-        print(f"\r{spinner_char} {message}...", end='', flush=True)
-        self.index += 1
+        """Show progress with spinner (thread-safe)."""
+        with self._lock:
+            self.last_message = message
+            spinner_char = self.spinner[self.index % len(self.spinner)]
+            print(f"\r{spinner_char} {message}...", end='', flush=True)
+            self.index += 1
     
     def clear(self):
-        """Clear the progress line."""
-        print(f"\r{' ' * (len(self.last_message) + 10)}\r", end='', flush=True)
+        """Clear the progress line (thread-safe)."""
+        with self._lock:
+            print(f"\r{' ' * (len(self.last_message) + 10)}\r", end='', flush=True)
 
 class ProductivityAnalyzer:
+    """Analyzes developer productivity changes before and after AI tool adoption.
+    
+    This class provides comprehensive git repository analysis to measure
+    productivity improvements, including commit frequency, code volume,
+    complexity analysis, and activity patterns.
+    
+    Attributes:
+        ai_start_date: Date when AI tool adoption began
+        tool_name: Name of the AI coding tool
+        analysis_days: Number of days to analyze before/after
+        top_files_limit: Maximum number of files to display in reports
+        top_days_limit: Maximum number of days to display in reports
+        tz: Timezone object for date handling
+    """
     def __init__(self, ai_start_date: str, tool_name: str = "AI Coding Tool", 
                  analysis_days: int = DEFAULT_ANALYSIS_DAYS,
                  timezone_str: str = "UTC",
                  top_files: int = DEFAULT_TOP_FILES_LIMIT,
                  top_days: int = DEFAULT_TOP_DAYS_LIMIT):
         """Initialize the analyzer with validated parameters."""
+        # Validate timezone parameter
+        if not timezone_str or not isinstance(timezone_str, str):
+            raise ValueError("Timezone must be a non-empty string")
+            
         try:
             # Parse date with timezone awareness
             naive_date = datetime.strptime(ai_start_date, "%Y-%m-%d")
-            if timezone_str == "UTC":
+            
+            # Handle timezone
+            if timezone_str.upper() == "UTC":
                 self.ai_start_date = naive_date.replace(tzinfo=timezone.utc)
+                self.tz = timezone.utc
+            elif HAS_ZONEINFO:
+                try:
+                    # Validate timezone exists
+                    if timezone_str not in available_timezones():
+                        # Provide helpful suggestions
+                        suggestions = [tz for tz in get_common_timezones() if tz.lower().startswith(timezone_str.lower())]
+                        if suggestions:
+                            raise ValueError(f"Invalid timezone '{timezone_str}'. Did you mean: {', '.join(suggestions[:3])}?")
+                        else:
+                            raise ValueError(f"Invalid timezone '{timezone_str}'. Use --timezone UTC or check available timezones.")
+                    
+                    tz = ZoneInfo(timezone_str)
+                    self.ai_start_date = naive_date.replace(tzinfo=tz)
+                    self.tz = tz
+                except ValueError:
+                    # Re-raise our custom error messages
+                    raise
+                except Exception as e:
+                    raise ValueError(f"Invalid timezone: {timezone_str}. Error: {e}")
             else:
-                # For other timezones, would need pytz or zoneinfo
+                # Fallback for Python < 3.9
+                if timezone_str.upper() != "UTC":
+                    print(f"Note: timezone support requires Python 3.9+. Using UTC instead of {timezone_str}.")
                 self.ai_start_date = naive_date.replace(tzinfo=timezone.utc)
-                print(f"Note: Using UTC timezone. Custom timezone support coming soon.")
-        except ValueError:
+                self.tz = timezone.utc
+                
+        except ValueError as e:
+            if "Invalid date format" in str(e) or "Invalid timezone" in str(e):
+                raise
             raise ValueError(f"Invalid date format: {ai_start_date}. Please use YYYY-MM-DD format.")
         
         # Validate date is not in the future
-        if self.ai_start_date > datetime.now(timezone.utc):
+        if self.ai_start_date > datetime.now(self.tz):
             raise ValueError("Start date cannot be in the future.")
         
         self.tool_name = tool_name
@@ -336,7 +394,13 @@ class ProductivityAnalyzer:
         self._print_top_files("After", after_data['file_changes'])
     
     def _print_complexity_breakdown(self, period: str, complexity: Dict[str, int], total_commits: int):
-        """Helper to print complexity breakdown."""
+        """Helper to print complexity breakdown.
+        
+        Args:
+            period: Time period label (e.g., 'Before', 'After')
+            complexity: Dictionary of complexity counts by level
+            total_commits: Total number of commits for percentage calculation
+        """
         print(f"{period} {self.tool_name}:")
         for level in ['high', 'medium', 'low']:
             count = complexity[level]
@@ -344,16 +408,28 @@ class ProductivityAnalyzer:
             print(f"  • {level.capitalize()} complexity: {count} ({percentage:.1f}%)")
     
     def _print_top_days(self, period: str, commits_by_date: Dict[str, int]):
-        """Helper to print most productive days."""
+        """Helper to print most productive days.
+        
+        Args:
+            period: Time period label (e.g., 'Before', 'After')
+            commits_by_date: Dictionary mapping dates to commit counts
+        """
         print(f"{period}:")
         sorted_days = sorted(commits_by_date.items(), key=lambda x: x[1], reverse=True)[:self.top_days_limit]
         for date, count in sorted_days:
             print(f"  • {date}: {count} commits")
     
     def _print_top_files(self, period: str, file_changes: Dict[str, int]):
-        """Helper to print most changed files."""
-        print(f"{period} (top {min(5, len(file_changes))}):")
-        for filename, count in list(file_changes.items())[:5]:
+        """Helper to print most changed files.
+        
+        Args:
+            period: Time period label (e.g., 'Before', 'After')
+            file_changes: Dictionary mapping filenames to change counts
+        """
+        # Use configured limit, but show fewer if less files available
+        display_limit = min(self.top_files_limit, len(file_changes))
+        print(f"{period} (top {display_limit}):")
+        for filename, count in list(file_changes.items())[:display_limit]:
             print(f"  • {filename}: {count} changes")
     
     def print_summary(self, before_daily: float, after_daily: float, before_complexity: Optional[Dict[str, int]] = None, 
@@ -377,7 +453,11 @@ class ProductivityAnalyzer:
         print(f"Repository: {self.get_repo_info()}")
     
     def print_verification_commands(self):
-        """Print commands others can use to verify results."""
+        """Print git commands others can use to independently verify results.
+        
+        Outputs commands that can be run in any git repository to
+        reproduce the commit count analysis.
+        """
         print(f"\n💡 HOW OTHERS CAN VERIFY")
         print(f"Run these commands in any git repo:")
         print(f'git rev-list --count --since="{self.before_start.strftime("%Y-%m-%d")}" --until="{self.before_end.strftime("%Y-%m-%d")}" HEAD')
@@ -483,6 +563,23 @@ class ProductivityAnalyzer:
         if not verbose:
             print(f"\n💬 Want detailed analysis? Run with --verbose flag")
 
+def get_common_timezones() -> List[str]:
+    """Get a list of common timezones for help text.
+    
+    Returns:
+        List of common timezone strings that are valid on the system.
+        Falls back to ['UTC'] if zoneinfo is not available.
+    """
+    common = [
+        "UTC", "US/Eastern", "US/Central", "US/Mountain", "US/Pacific",
+        "Europe/London", "Europe/Paris", "Europe/Berlin", "Asia/Tokyo",
+        "Asia/Shanghai", "Australia/Sydney"
+    ]
+    if HAS_ZONEINFO:
+        # Verify these are valid
+        return [tz for tz in common if tz in available_timezones() or tz == "UTC"]
+    return ["UTC"]
+
 def main():
     parser = argparse.ArgumentParser(description="Analyze coding productivity before/after AI tool adoption")
     parser.add_argument("--start-date", required=True, help="Date when you started using AI tool (YYYY-MM-DD)")
@@ -495,8 +592,15 @@ def main():
                        help="Number of top files to display (default: 10)")
     parser.add_argument("--top-days", type=int, default=DEFAULT_TOP_DAYS_LIMIT,
                        help="Number of most productive days to show (default: 5)")
-    parser.add_argument("--timezone", default="UTC",
-                       help="Timezone for analysis (default: UTC)")
+    # Build timezone help text
+    tz_help = "Timezone for analysis (default: UTC)"
+    if HAS_ZONEINFO:
+        common_tz = get_common_timezones()
+        tz_help += f". Examples: {', '.join(common_tz[:5])}"
+    else:
+        tz_help += ". Note: Full timezone support requires Python 3.9+"
+    
+    parser.add_argument("--timezone", default="UTC", help=tz_help)
     
     args = parser.parse_args()
     
