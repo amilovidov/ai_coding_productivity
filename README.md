@@ -79,6 +79,14 @@ For comprehensive metrics including commit complexity, file changes, and activit
 python ai_productivity_analyzer.py --start-date 2025-06-21 --tool "Claude Code" --verbose
 ```
 
+### Custom Analysis Periods
+
+Analyze different time periods before and after adoption (e.g., 60 days before, 30 days after):
+
+```bash
+python ai_productivity_analyzer.py --start-date 2025-06-21 --tool "Claude Code" --days-before 60 --days-after 30
+```
+
 ## 📖 Command Line Options
 
 | Option | Description | Default |
@@ -86,10 +94,12 @@ python ai_productivity_analyzer.py --start-date 2025-06-21 --tool "Claude Code" 
 | `--start-date` | Date when you started using the AI tool (YYYY-MM-DD) | Required |
 | `--tool` | Name of the AI tool (e.g., 'Claude Code', 'GitHub Copilot') | "AI Coding Tool" |
 | `--days` | Number of days to analyze before/after | 30 |
+| `--days-before` | Override days to analyze before AI adoption | --days value |
+| `--days-after` | Override days to analyze after AI adoption | --days value |
 | `--verbose` | Show detailed analysis with all metrics | False (concise mode) |
 | `--top-files` | Number of top changed files to display | 10 |
 | `--top-days` | Number of most productive days to show | 5 |
-| `--timezone` | Timezone for date calculations (currently UTC only) | "UTC" |
+| `--timezone` | Timezone for date calculations | "UTC" |
 
 ## 📊 Metrics Explained
 

@@ -103,10 +103,23 @@ class ProductivityAnalyzer:
     """
     def __init__(self, ai_start_date: str, tool_name: str = "AI Coding Tool", 
                  analysis_days: int = DEFAULT_ANALYSIS_DAYS,
+                 days_before: Optional[int] = None,
+                 days_after: Optional[int] = None,
                  timezone_str: str = "UTC",
                  top_files: int = DEFAULT_TOP_FILES_LIMIT,
                  top_days: int = DEFAULT_TOP_DAYS_LIMIT):
-        """Initialize the analyzer with validated parameters."""
+        """Initialize the analyzer with validated parameters.
+        
+        Args:
+            ai_start_date: Date when AI tool adoption began (YYYY-MM-DD)
+            tool_name: Name of the AI coding tool
+            analysis_days: Number of days to analyze before/after (default for both)
+            days_before: Override days to analyze before AI adoption (optional)
+            days_after: Override days to analyze after AI adoption (optional)
+            timezone_str: Timezone for date calculations
+            top_files: Maximum number of files to display
+            top_days: Maximum number of days to display
+        """
         # Validate timezone parameter
         if not timezone_str or not isinstance(timezone_str, str):
             raise ValueError("Timezone must be a non-empty string")
@@ -161,11 +174,21 @@ class ProductivityAnalyzer:
         self.progress = ProgressIndicator()
         self._command_cache: Dict[str, str] = {}
         
+        # Use specific periods if provided, otherwise use analysis_days for both
+        self.days_before = days_before if days_before is not None else analysis_days
+        self.days_after = days_after if days_after is not None else analysis_days
+        
+        # Validate periods
+        if self.days_before <= 0:
+            raise ValueError("Days before must be positive")
+        if self.days_after <= 0:
+            raise ValueError("Days after must be positive")
+        
         # Calculate periods
-        self.before_start = self.ai_start_date - timedelta(days=analysis_days)
+        self.before_start = self.ai_start_date - timedelta(days=self.days_before)
         self.before_end = self.ai_start_date - timedelta(days=1)
         self.after_start = self.ai_start_date
-        self.after_end = self.ai_start_date + timedelta(days=analysis_days)
+        self.after_end = self.ai_start_date + timedelta(days=self.days_after)
     
     def run_git_command(self, command_parts: List[str], use_cache: bool = True) -> str:
         """Execute git command safely and return output."""
@@ -349,15 +372,15 @@ class ProductivityAnalyzer:
     
     def print_core_metrics(self, before_commits: int, after_commits: int) -> Tuple[float, float]:
         """Print core productivity metrics and return daily averages."""
-        # Calculate daily averages
-        before_daily = before_commits / self.analysis_days
-        after_daily = after_commits / self.analysis_days
+        # Calculate daily averages using the specific periods
+        before_daily = before_commits / self.days_before
+        after_daily = after_commits / self.days_after
         
         productivity_increase, multiplier = self.calculate_productivity_change(before_daily, after_daily)
         
         print(f"\n📊 CORE RESULTS")
-        print(f"Before {self.tool_name}: {before_commits} commits in {self.analysis_days} days ({before_daily:.1f}/day)")
-        print(f"After {self.tool_name}: {after_commits} commits in {self.analysis_days} days ({after_daily:.1f}/day)")
+        print(f"Before {self.tool_name}: {before_commits} commits in {self.days_before} days ({before_daily:.1f}/day)")
+        print(f"After {self.tool_name}: {after_commits} commits in {self.days_after} days ({after_daily:.1f}/day)")
         
         if before_daily > 0:
             print(f"Productivity increase: {productivity_increase:+.1f}% ({multiplier:.1f}x multiplier)")
@@ -449,7 +472,10 @@ class ProductivityAnalyzer:
         if before_complexity and after_complexity:
             print(f"Complex feature commits: {before_complexity['high']} → {after_complexity['high']}")
         
-        print(f"Analysis period: {self.analysis_days} days before/after")
+        if self.days_before == self.days_after:
+            print(f"Analysis period: {self.days_before} days before/after")
+        else:
+            print(f"Analysis period: {self.days_before} days before, {self.days_after} days after")
         print(f"Repository: {self.get_repo_info()}")
     
     def print_verification_commands(self):
@@ -493,7 +519,10 @@ class ProductivityAnalyzer:
         """Generate productivity report (concise by default, detailed with verbose=True)."""
         print(f"\n🚀 AI Coding Productivity Report")
         print(f"Tool: {self.tool_name}")
-        print(f"Analysis Period: {self.analysis_days} days before/after")
+        if self.days_before == self.days_after:
+            print(f"Analysis Period: {self.days_before} days before/after")
+        else:
+            print(f"Analysis Period: {self.days_before} days before, {self.days_after} days after")
         print(f"AI Adoption Date: {self.ai_start_date.strftime('%Y-%m-%d')}")
         print("=" * 60)
         
@@ -585,6 +614,8 @@ def main():
     parser.add_argument("--start-date", required=True, help="Date when you started using AI tool (YYYY-MM-DD)")
     parser.add_argument("--tool", default="AI Coding Tool", help="Name of the AI tool (e.g., 'Claude Code')")
     parser.add_argument("--days", type=int, default=DEFAULT_ANALYSIS_DAYS, help="Number of days to analyze before/after (default: 30)")
+    parser.add_argument("--days-before", type=int, help="Override days to analyze before AI adoption (default: --days value)")
+    parser.add_argument("--days-after", type=int, help="Override days to analyze after AI adoption (default: --days value)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed analysis (default: concise LinkedIn-ready output)")
     
     # New configurable options
@@ -609,6 +640,12 @@ def main():
         if args.days <= 0:
             raise ValueError("Number of days must be positive")
         
+        # Validate specific period overrides
+        if args.days_before is not None and args.days_before <= 0:
+            raise ValueError("Days before must be positive")
+        if args.days_after is not None and args.days_after <= 0:
+            raise ValueError("Days after must be positive")
+        
         # Validate top files/days parameters
         if args.top_files <= 0:
             raise ValueError("Number of top files must be positive")
@@ -619,6 +656,8 @@ def main():
             args.start_date, 
             args.tool, 
             args.days,
+            args.days_before,
+            args.days_after,
             args.timezone,
             args.top_files,
             args.top_days
