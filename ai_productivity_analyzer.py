@@ -15,58 +15,157 @@ Requirements:
 import subprocess
 import argparse
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import re
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Iterator
 import sys
 import os
+from functools import lru_cache
+import time
 
 # Configuration constants
 DEFAULT_ANALYSIS_DAYS = 30
-TOP_FILES_LIMIT = 10
-TOP_DAYS_LIMIT = 5
+DEFAULT_TOP_FILES_LIMIT = 10
+DEFAULT_TOP_DAYS_LIMIT = 5
+
+# Expanded commit complexity keywords
+COMPLEXITY_KEYWORDS = {
+    'high': [
+        'refactor', 'architecture', 'implement', 'integration', 'system', 
+        'pipeline', 'migration', 'breaking', 'redesign', 'rewrite', 'major'
+    ],
+    'medium': [
+        'feat', 'feature', 'enhance', 'improve', 'add', 'update', 'perf',
+        'performance', 'optimize', 'test', 'tests', 'new', 'create'
+    ],
+    'low': [
+        'fix', 'bug', 'typo', 'cleanup', 'docs', 'chore', 'style',
+        'format', 'lint', 'ci', 'build', 'deps', 'dep', 'minor', 'patch'
+    ]
+}
+
+# Git host patterns for repository detection
+GIT_HOST_PATTERNS = [
+    (r'github\.com[:/](.+?)(?:\.git)?$', 'GitHub'),
+    (r'gitlab\.com[:/](.+?)(?:\.git)?$', 'GitLab'),
+    (r'bitbucket\.org[:/](.+?)(?:\.git)?$', 'Bitbucket'),
+    (r'dev\.azure\.com/[^/]+/([^/]+)', 'Azure DevOps'),
+    (r'ssh://git@[^/]+/(.+?)(?:\.git)?$', 'Self-hosted'),
+]
+
+class ProgressIndicator:
+    """Simple progress indicator for long-running operations."""
+    
+    def __init__(self):
+        self.spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.index = 0
+        self.last_message = ""
+    
+    def show(self, message: str):
+        """Show progress with spinner."""
+        self.last_message = message
+        spinner_char = self.spinner[self.index % len(self.spinner)]
+        print(f"\r{spinner_char} {message}...", end='', flush=True)
+        self.index += 1
+    
+    def clear(self):
+        """Clear the progress line."""
+        print(f"\r{' ' * (len(self.last_message) + 10)}\r", end='', flush=True)
 
 class ProductivityAnalyzer:
-    def __init__(self, ai_start_date: str, tool_name: str = "AI Coding Tool", analysis_days: int = DEFAULT_ANALYSIS_DAYS):
+    def __init__(self, ai_start_date: str, tool_name: str = "AI Coding Tool", 
+                 analysis_days: int = DEFAULT_ANALYSIS_DAYS,
+                 timezone_str: str = "UTC",
+                 top_files: int = DEFAULT_TOP_FILES_LIMIT,
+                 top_days: int = DEFAULT_TOP_DAYS_LIMIT):
         """Initialize the analyzer with validated parameters."""
         try:
-            self.ai_start_date = datetime.strptime(ai_start_date, "%Y-%m-%d")
+            # Parse date with timezone awareness
+            naive_date = datetime.strptime(ai_start_date, "%Y-%m-%d")
+            if timezone_str == "UTC":
+                self.ai_start_date = naive_date.replace(tzinfo=timezone.utc)
+            else:
+                # For other timezones, would need pytz or zoneinfo
+                self.ai_start_date = naive_date.replace(tzinfo=timezone.utc)
+                print(f"Note: Using UTC timezone. Custom timezone support coming soon.")
         except ValueError:
             raise ValueError(f"Invalid date format: {ai_start_date}. Please use YYYY-MM-DD format.")
         
         # Validate date is not in the future
-        if self.ai_start_date > datetime.now():
+        if self.ai_start_date > datetime.now(timezone.utc):
             raise ValueError("Start date cannot be in the future.")
         
         self.tool_name = tool_name
         self.analysis_days = analysis_days
+        self.top_files_limit = top_files
+        self.top_days_limit = top_days
+        self.progress = ProgressIndicator()
+        self._command_cache: Dict[str, str] = {}
         
         # Calculate periods
         self.before_start = self.ai_start_date - timedelta(days=analysis_days)
         self.before_end = self.ai_start_date - timedelta(days=1)
         self.after_start = self.ai_start_date
         self.after_end = self.ai_start_date + timedelta(days=analysis_days)
-        
-    def run_git_command(self, command_parts: List[str]) -> str:
+    
+    def run_git_command(self, command_parts: List[str], use_cache: bool = True) -> str:
         """Execute git command safely and return output."""
+        cache_key = ' '.join(command_parts)
+        
+        # Check cache first
+        if use_cache and cache_key in self._command_cache:
+            return self._command_cache[cache_key]
+        
         try:
             # Ensure we're in a git repository
             if not os.path.exists('.git'):
                 raise RuntimeError("Not in a git repository. Please run from the root of a git repository.")
             
             result = subprocess.run(command_parts, capture_output=True, text=True, check=True)
-            return result.stdout.strip()
+            output = result.stdout.strip()
+            
+            # Cache the result
+            if use_cache:
+                self._command_cache[cache_key] = output
+            
+            return output
         except subprocess.CalledProcessError as e:
-            print(f"Git command failed: {' '.join(command_parts)}")
+            print(f"\nGit command failed: {' '.join(command_parts)}")
             print(f"Error: {e.stderr}")
             return ""
         except FileNotFoundError:
-            print("Error: Git is not installed or not in PATH")
+            print("\nError: Git is not installed or not in PATH")
             sys.exit(1)
     
+    def run_git_command_streaming(self, command_parts: List[str]) -> Iterator[str]:
+        """Execute git command and stream output line by line for memory efficiency."""
+        try:
+            # Ensure we're in a git repository
+            if not os.path.exists('.git'):
+                raise RuntimeError("Not in a git repository. Please run from the root of a git repository.")
+            
+            with subprocess.Popen(command_parts, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                                text=True, bufsize=1) as proc:
+                for line in proc.stdout:
+                    yield line.strip()
+                
+                # Check for errors
+                proc.wait()
+                if proc.returncode != 0:
+                    stderr = proc.stderr.read()
+                    print(f"\nGit command failed: {' '.join(command_parts)}")
+                    print(f"Error: {stderr}")
+                    
+        except FileNotFoundError:
+            print("\nError: Git is not installed or not in PATH")
+            sys.exit(1)
+    
+    @lru_cache(maxsize=32)
     def get_commit_count(self, start_date: datetime, end_date: datetime) -> int:
-        """Get number of commits in date range."""
+        """Get number of commits in date range with caching."""
+        self.progress.show("Counting commits")
+        
         # Using git rev-list for more accurate counting
         cmd_parts = [
             'git', 'rev-list', '--count',
@@ -78,30 +177,38 @@ class ProductivityAnalyzer:
         return int(result) if result and result.isdigit() else 0
     
     def get_commit_details(self, start_date: datetime, end_date: datetime) -> Tuple[Dict[str, int], List[str]]:
-        """Get detailed commit information."""
+        """Get detailed commit information with streaming for large repos."""
+        self.progress.show("Analyzing commit details")
+        
         cmd_parts = [
             'git', 'log',
             f'--since={start_date.strftime("%Y-%m-%d")}',
             f'--until={end_date.strftime("%Y-%m-%d")}',
             '--pretty=format:%cd|%s',
-            '--date=short'
+            '--date=iso-strict'  # Use ISO format with timezone
         ]
-        result = self.run_git_command(cmd_parts)
         
         commits_by_date = defaultdict(int)
         commit_messages = []
         
-        if result:
-            for line in result.split('\n'):
-                if '|' in line:
-                    date, message = line.split('|', 1)
-                    commits_by_date[date] += 1
+        for line in self.run_git_command_streaming(cmd_parts):
+            if '|' in line:
+                date_str, message = line.split('|', 1)
+                # Parse ISO date and convert to simple date string
+                try:
+                    commit_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    date_key = commit_date.strftime('%Y-%m-%d')
+                    commits_by_date[date_key] += 1
                     commit_messages.append(message.strip())
+                except ValueError:
+                    continue
         
         return dict(commits_by_date), commit_messages
     
     def get_lines_changed(self, start_date: datetime, end_date: datetime) -> Tuple[int, int]:
-        """Get lines added/removed in date range."""
+        """Get lines added/removed in date range, handling binary files."""
+        self.progress.show("Calculating lines changed")
+        
         cmd_parts = [
             'git', 'log',
             f'--since={start_date.strftime("%Y-%m-%d")}',
@@ -109,22 +216,32 @@ class ProductivityAnalyzer:
             '--numstat',
             '--pretty=format:'
         ]
-        result = self.run_git_command(cmd_parts)
         
         total_insertions = 0
         total_deletions = 0
+        binary_files = 0
         
-        if result:
-            for line in result.split('\n'):
-                parts = line.strip().split('\t')
-                if len(parts) >= 3 and parts[0].isdigit() and parts[1].isdigit():
+        for line in self.run_git_command_streaming(cmd_parts):
+            parts = line.strip().split('\t')
+            if len(parts) >= 3:
+                # Check for binary files (shown as - -)
+                if parts[0] == '-' or parts[1] == '-':
+                    binary_files += 1
+                    continue
+                    
+                if parts[0].isdigit() and parts[1].isdigit():
                     total_insertions += int(parts[0])
                     total_deletions += int(parts[1])
+        
+        if binary_files > 0:
+            print(f"\n  Note: {binary_files} binary file(s) excluded from line count")
         
         return total_insertions, total_deletions
     
     def get_file_changes(self, start_date: datetime, end_date: datetime) -> Dict[str, int]:
-        """Get most frequently changed files."""
+        """Get most frequently changed files with streaming."""
+        self.progress.show("Analyzing file changes")
+        
         cmd_parts = [
             'git', 'log',
             f'--since={start_date.strftime("%Y-%m-%d")}',
@@ -132,33 +249,26 @@ class ProductivityAnalyzer:
             '--name-only',
             '--pretty=format:'
         ]
-        result = self.run_git_command(cmd_parts)
         
         file_counts = defaultdict(int)
-        if result:
-            for line in result.split('\n'):
-                if line.strip():
-                    file_counts[line.strip()] += 1
+        
+        for line in self.run_git_command_streaming(cmd_parts):
+            if line.strip():
+                file_counts[line.strip()] += 1
         
         # Sort by count and return top files
         sorted_files = sorted(file_counts.items(), key=lambda x: x[1], reverse=True)
-        return dict(sorted_files[:TOP_FILES_LIMIT])
+        return dict(sorted_files[:self.top_files_limit])
     
     def analyze_commit_complexity(self, commit_messages: List[str]) -> Dict[str, int]:
-        """Analyze commit message complexity and types."""
-        complexity_keywords = {
-            'high': ['refactor', 'architecture', 'implement', 'integration', 'system', 'pipeline', 'migration'],
-            'medium': ['feat', 'feature', 'enhance', 'improve', 'add', 'update'],
-            'low': ['fix', 'bug', 'typo', 'cleanup', 'docs', 'chore']
-        }
-        
+        """Analyze commit message complexity with expanded keywords."""
         complexity_counts = {'high': 0, 'medium': 0, 'low': 0}
         
         for message in commit_messages:
             message_lower = message.lower()
             categorized = False
             
-            for level, keywords in complexity_keywords.items():
+            for level, keywords in COMPLEXITY_KEYWORDS.items():
                 if any(keyword in message_lower for keyword in keywords):
                     complexity_counts[level] += 1
                     categorized = True
@@ -236,13 +346,13 @@ class ProductivityAnalyzer:
     def _print_top_days(self, period: str, commits_by_date: Dict[str, int]):
         """Helper to print most productive days."""
         print(f"{period}:")
-        sorted_days = sorted(commits_by_date.items(), key=lambda x: x[1], reverse=True)[:TOP_DAYS_LIMIT]
+        sorted_days = sorted(commits_by_date.items(), key=lambda x: x[1], reverse=True)[:self.top_days_limit]
         for date, count in sorted_days:
             print(f"  • {date}: {count} commits")
     
     def _print_top_files(self, period: str, file_changes: Dict[str, int]):
         """Helper to print most changed files."""
-        print(f"{period} (top 5):")
+        print(f"{period} (top {min(5, len(file_changes))}):")
         for filename, count in list(file_changes.items())[:5]:
             print(f"  • {filename}: {count} changes")
     
@@ -274,13 +384,27 @@ class ProductivityAnalyzer:
         print(f'git rev-list --count --since="{self.after_start.strftime("%Y-%m-%d")}" --until="{self.after_end.strftime("%Y-%m-%d")}" HEAD')
     
     def get_repo_info(self) -> str:
-        """Get repository information."""
+        """Get repository information with support for multiple git hosts."""
         try:
             remote_url = self.run_git_command(['git', 'config', '--get', 'remote.origin.url'])
-            if remote_url and "github.com" in remote_url:
-                # Extract repo name from GitHub URL
-                repo_name = remote_url.split("/")[-1].replace(".git", "")
-                return repo_name
+            if remote_url:
+                # Try to match against known patterns
+                for pattern, host in GIT_HOST_PATTERNS:
+                    match = re.search(pattern, remote_url, re.IGNORECASE)
+                    if match:
+                        repo_name = match.group(1)
+                        # Clean up repo name
+                        repo_name = repo_name.replace('.git', '')
+                        return f"{repo_name} ({host})"
+                
+                # Generic git URL
+                if '.git' in remote_url or 'git@' in remote_url:
+                    # Extract last part of URL as repo name
+                    parts = remote_url.rstrip('/').split('/')
+                    if parts:
+                        repo_name = parts[-1].replace('.git', '')
+                        return f"{repo_name} (Git)"
+            
             return "Local repository"
         except:
             return "Local repository"
@@ -294,8 +418,14 @@ class ProductivityAnalyzer:
         print("=" * 60)
         
         # Get basic metrics
+        self.progress.show("Analyzing commit history")
         before_commits = self.get_commit_count(self.before_start, self.before_end)
+        
+        self.progress.show("Analyzing recent commits")
         after_commits = self.get_commit_count(self.after_start, self.after_end)
+        
+        # Clear progress indicator
+        self.progress.clear()
         
         # Print core metrics
         before_daily, after_daily = self.print_core_metrics(before_commits, after_commits)
@@ -305,6 +435,8 @@ class ProductivityAnalyzer:
         after_complexity = None
         
         if verbose:
+            print("\n⏳ Gathering detailed metrics...")
+            
             # Gather all detailed data
             before_commits_by_date, before_messages = self.get_commit_details(self.before_start, self.before_end)
             after_commits_by_date, after_messages = self.get_commit_details(self.after_start, self.after_end)
@@ -317,6 +449,9 @@ class ProductivityAnalyzer:
             
             before_files = self.get_file_changes(self.before_start, self.before_end)
             after_files = self.get_file_changes(self.after_start, self.after_end)
+            
+            # Clear final progress
+            self.progress.clear()
             
             # Package data for detailed metrics
             before_data = {
@@ -355,6 +490,14 @@ def main():
     parser.add_argument("--days", type=int, default=DEFAULT_ANALYSIS_DAYS, help="Number of days to analyze before/after (default: 30)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed analysis (default: concise LinkedIn-ready output)")
     
+    # New configurable options
+    parser.add_argument("--top-files", type=int, default=DEFAULT_TOP_FILES_LIMIT, 
+                       help="Number of top files to display (default: 10)")
+    parser.add_argument("--top-days", type=int, default=DEFAULT_TOP_DAYS_LIMIT,
+                       help="Number of most productive days to show (default: 5)")
+    parser.add_argument("--timezone", default="UTC",
+                       help="Timezone for analysis (default: UTC)")
+    
     args = parser.parse_args()
     
     try:
@@ -362,8 +505,22 @@ def main():
         if args.days <= 0:
             raise ValueError("Number of days must be positive")
         
-        analyzer = ProductivityAnalyzer(args.start_date, args.tool, args.days)
+        # Validate top files/days parameters
+        if args.top_files <= 0:
+            raise ValueError("Number of top files must be positive")
+        if args.top_days <= 0:
+            raise ValueError("Number of top days must be positive")
+        
+        analyzer = ProductivityAnalyzer(
+            args.start_date, 
+            args.tool, 
+            args.days,
+            args.timezone,
+            args.top_files,
+            args.top_days
+        )
         analyzer.generate_report(verbose=args.verbose)
+        
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)
@@ -371,10 +528,10 @@ def main():
         print(f"Error: {e}")
         sys.exit(1)
     except KeyboardInterrupt:
-        print("\nAnalysis cancelled by user")
+        print("\n\nAnalysis cancelled by user")
         sys.exit(0)
     except Exception as e:
-        print(f"Unexpected error: {e}")
+        print(f"\nUnexpected error: {e}")
         print("Please report this issue with the full error message.")
         sys.exit(1)
 

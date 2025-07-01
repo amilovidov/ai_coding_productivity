@@ -19,6 +19,14 @@ This tool analyzes your git commit history to measure productivity changes befor
 - **Flexible Analysis**: Customize the analysis period (default: 30 days)
 - **Easy Verification**: Provides git commands others can run to verify your results
 - **Repository Agnostic**: Works with any git repository
+- **Memory Efficient**: Streaming processing for large repositories
+- **Progress Indicators**: Visual feedback during analysis
+- **Multi-Platform Support**: Recognizes GitHub, GitLab, Bitbucket, and more
+- **Binary File Handling**: Properly excludes binary files from line counts
+- **Timezone Aware**: Date handling with timezone support
+- **Configurable Limits**: Customize how many top files/days to display
+- **Enhanced Keywords**: Expanded commit complexity detection
+- **Smart Caching**: Avoids redundant git commands
 
 ## 📋 Requirements
 
@@ -79,6 +87,9 @@ python ai_productivity_analyzer.py --start-date 2025-06-21 --tool "Claude Code" 
 | `--tool` | Name of the AI tool (e.g., 'Claude Code', 'GitHub Copilot') | "AI Coding Tool" |
 | `--days` | Number of days to analyze before/after | 30 |
 | `--verbose` | Show detailed analysis with all metrics | False (concise mode) |
+| `--top-files` | Number of top changed files to display | 10 |
+| `--top-days` | Number of most productive days to show | 5 |
+| `--timezone` | Timezone for date calculations (currently UTC only) | "UTC" |
 
 ## 📊 Metrics Explained
 
